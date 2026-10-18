@@ -1,0 +1,31 @@
+{
+  "name": "learnboard",
+  "version": "1.0.0",
+  "description": "Bảng đen dạy học tương tác & Video Call thời gian thực",
+  "main": "server.js",
+  "scripts": {
+    "dev:server": "node server.js",
+    "dev:client": "npm --prefix client run dev",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "build": "npm --prefix client run build",
+    "start": "node server.js",
+    "tunnel": "node tunnel.js",
+    "app": "concurrently \"node server.js\" \"node tunnel.js\""
+  },
+  "keywords": [
+    "blackboard",
+    "teaching",
+    "webrtc",
+    "socketio",
+    "realtime"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "concurrently": "^9.1.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "untun": "^0.2.2"
+  }
+}
