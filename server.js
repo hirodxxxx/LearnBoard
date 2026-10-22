@@ -5,9 +5,47 @@ const fs = require('fs');
 const cors = require('cors');
 const { Server } = require('socket.io');
 
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+const TURN_CREDENTIAL_TTL_SECONDS = Number(process.env.CLOUDFLARE_TURN_CREDENTIAL_TTL || 86400);
+const TURN_STUN_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.nextcloud.com:443' }
+];
+const turnCredentialRequests = new Map();
+
+function isTurnCredentialRateLimited(req) {
+  const now = Date.now();
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  const windowMs = 60 * 1000;
+  const maxRequests = 60;
+  const requestTimes = (turnCredentialRequests.get(clientIp) || [])
+    .filter((timestamp) => now - timestamp < windowMs);
+
+  if (requestTimes.length >= maxRequests) {
+    turnCredentialRequests.set(clientIp, requestTimes);
+    return true;
+  }
+
+  requestTimes.push(now);
+  turnCredentialRequests.set(clientIp, requestTimes);
+
+  if (turnCredentialRequests.size > 1000) {
+    for (const [ip, timestamps] of turnCredentialRequests) {
+      if (timestamps.every((timestamp) => now - timestamp >= windowMs)) {
+        turnCredentialRequests.delete(ip);
+      }
+    }
+  }
+
+  return false;
+}
 
 // Ensure recordings directory exists
 const recordingsDir = path.join(__dirname, 'lich-su-hoc-tap');
@@ -25,6 +63,70 @@ app.get('/api/tunnel-info', (req, res) => {
     tunnelUrl: publicTunnelUrl,
     roomId: currentDefaultRoomId
   });
+});
+
+app.get('/api/ice-servers', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+
+  if (isTurnCredentialRateLimited(req)) {
+    return res.status(429).json({ error: 'Too many TURN credential requests. Try again shortly.' });
+  }
+
+  const turnKeyId = process.env.CLOUDFLARE_TURN_KEY_ID;
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+
+  if (!turnKeyId || !apiToken) {
+    return res.status(503).json({
+      error: 'Cloudflare TURN is not configured on the server.'
+    });
+  }
+
+  if (!Number.isInteger(TURN_CREDENTIAL_TTL_SECONDS)
+    || TURN_CREDENTIAL_TTL_SECONDS < 60
+    || TURN_CREDENTIAL_TTL_SECONDS > 172800) {
+    console.error('[WebRTC] Invalid CLOUDFLARE_TURN_CREDENTIAL_TTL; expected 60-172800 seconds.');
+    return res.status(500).json({ error: 'TURN credential lifetime is misconfigured on the server.' });
+  }
+
+  try {
+    const cloudflareResponse = await fetch(
+      `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(turnKeyId)}/credentials/generate-ice-servers`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ ttl: TURN_CREDENTIAL_TTL_SECONDS })
+      }
+    );
+
+    if (!cloudflareResponse.ok) {
+      console.error(`[WebRTC] Cloudflare TURN credential request failed with HTTP ${cloudflareResponse.status}.`);
+      return res.status(502).json({ error: 'Cloudflare could not issue TURN credentials.' });
+    }
+
+    const result = await cloudflareResponse.json();
+    const hasTurnServer = Array.isArray(result.iceServers) && result.iceServers.some((server) => {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      return urls.some((url) => typeof url === 'string' && url.startsWith('turn'))
+        && typeof server.username === 'string'
+        && typeof server.credential === 'string';
+    });
+
+    if (!hasTurnServer) {
+      console.error('[WebRTC] Cloudflare returned an invalid TURN server configuration.');
+      return res.status(502).json({ error: 'Cloudflare returned invalid TURN credentials.' });
+    }
+
+    return res.json({
+      iceServers: [...TURN_STUN_SERVERS, ...result.iceServers],
+      expiresAt: Date.now() + TURN_CREDENTIAL_TTL_SECONDS * 1000
+    });
+  } catch (error) {
+    console.error('[WebRTC] Error requesting Cloudflare TURN credentials:', error.message);
+    return res.status(502).json({ error: 'Unable to request TURN credentials from Cloudflare.' });
+  }
 });
 
 app.post('/api/tunnel-info', (req, res) => {

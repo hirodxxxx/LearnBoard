@@ -49,10 +49,10 @@
 - Hỗ trợ kéo thả di chuyển vị trí, thu phóng kích thước, xoay và **Ghim cố định (Pin)** xuống nền bảng để cả hai bên viết lời giải đè lên ảnh.
 
 ### 3. 📹 Video Call 1-1 & Chia Sẻ Màn Hình Hai Chiều (WebRTC P2P)
-- Đàm thoại Video và Âm thanh trực tiếp P2P (Peer-to-Peer) với độ trễ gần như bằng 0.
+- Đàm thoại Video và Âm thanh qua WebRTC P2P, có TURN relay dự phòng; độ trễ thực tế phụ thuộc chất lượng mạng và đường truyền được chọn.
 - **Chia sẻ màn hình 2 chiều (Giáo viên $\leftrightarrow$ Học sinh)**: Cả cô giáo lẫn học sinh đều có thể share màn hình bài tập.
 - **Cửa sổ nổi độc lập (`screen-viewer.html`)**: Mở màn hình chia sẻ sang một cửa sổ trình duyệt riêng biệt nổi lên trên, vừa xem bài giảng vừa thao tác trên bảng.
-- **Tự động thích ứng**: Tích hợp luồng Video Canvas dự phòng khi test 2 tab trên cùng 1 máy tính và tối ưu hóa `contentHint = 'detail'` chống mờ chữ.
+- **Tự động thích ứng**: Tích hợp luồng Video Canvas dự phòng khi test 2 tab trên cùng 1 máy tính; chia sẻ màn hình ưu tiên độ phản hồi với `contentHint = 'motion'`.
 
 ### 4. 🎙️ Ghi Hình Buổi Học Toàn Diện (Full Web Tab & Mixed Audio)
 - Nút **"Ghi hình Tab Web"** chuyên dụng: Quay lại chính xác toàn bộ giao diện bảng đen, thao tác viết vẽ, hình ảnh bài tập và video call.
@@ -97,6 +97,18 @@ Hệ thống sẽ tự động:
 3. **Học sinh vào lớp**:
    - Gửi link qua Zalo/Tin nhắn cho học sinh.
    - Học sinh chỉ cần click vào link bằng bất kỳ trình duyệt nào (**Chrome, Edge, Cốc Cốc, Safari iPad, Điện thoại**) là vào thẳng lớp học mà không cần cài đặt thêm bất kỳ phần mềm nào.
+
+### Cấu hình Cloudflare TURN (tùy chọn)
+
+Để dùng TURN relay khi kết nối P2P không thiết lập được:
+
+1. Tạo TURN key trong Cloudflare Realtime và tạo API token có quyền **Calls: Write** trên đúng account.
+2. Sao chép `.env.example` thành `.env`, sau đó điền `CLOUDFLARE_TURN_KEY_ID` và `CLOUDFLARE_API_TOKEN`.
+3. Khởi động lại LearnBoard. Backend sẽ tạo credentials ngắn hạn qua `/api/ice-servers`; trình duyệt chỉ nhận ICE credentials tạm thời, không nhận API token hay TURN key secret.
+
+Không commit `.env` và không đặt các secret này trong biến môi trường `VITE_*`. Mặc định credential có hiệu lực 24 giờ; hãy đặt `CLOUDFLARE_TURN_CREDENTIAL_TTL` dài hơn buổi học dài nhất (giới hạn Cloudflare hiện tại là 48 giờ). Nếu chưa cấu hình hoặc Cloudflare tạm thời không cấp được credentials, LearnBoard ghi cảnh báo và vẫn thử kết nối STUN/P2P.
+
+Khi kết nối WebRTC đã lên, ứng dụng ghi chẩn đoán mỗi 10 giây trong console trình duyệt (`[WebRTC] Connection diagnostics`): loại candidate, RTT, bitrate, jitter và mất gói. Chia sẻ màn hình giới hạn ở 15 fps và tối đa 1.2 Mbps để giảm nghẽn uplink; đây là mức đánh đổi chất lượng/hình ảnh lấy độ trễ thấp hơn.
 
 ---
 

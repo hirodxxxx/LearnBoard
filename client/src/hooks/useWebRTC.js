@@ -1,13 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-// Free Google STUN servers for NAT traversal
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' }
-  ]
-};
+const STUN_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.nextcloud.com:443' }
+];
 
 export function useWebRTC(socket, currentUserId, userName) {
   const [localStream, setLocalStream] = useState(null);
@@ -24,10 +22,18 @@ export function useWebRTC(socket, currentUserId, userName) {
   const remoteStreamRef = useRef(null);
   const connectedPeerRef = useRef(null);
   const pendingIceCandidatesRef = useRef([]);
+  const iceServersCacheRef = useRef(null);
+  const statsIntervalRef = useRef(null);
 
   useEffect(() => {
     connectedPeerRef.current = connectedPeer;
   }, [connectedPeer]);
+
+  useEffect(() => () => {
+    if (statsIntervalRef.current) {
+      clearInterval(statsIntervalRef.current);
+    }
+  }, []);
 
   const stablePopoutStreamRef = useRef(null);
   const stableVideoTrackIdRef = useRef(null);
@@ -161,15 +167,49 @@ export function useWebRTC(socket, currentUserId, userName) {
     }
   };
 
+  const getIceServers = useCallback(async () => {
+    const cachedConfig = iceServersCacheRef.current;
+    if (cachedConfig && cachedConfig.expiresAt > Date.now() + 30000) {
+      return cachedConfig.iceServers;
+    }
+
+    try {
+      const response = await fetch('/api/ice-servers', { cache: 'no-store' });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+      if (!Array.isArray(result.iceServers) || !Number.isFinite(result.expiresAt)) {
+        throw new Error('Invalid ICE server configuration from backend.');
+      }
+
+      iceServersCacheRef.current = result;
+      return result.iceServers;
+    } catch (error) {
+      console.warn('[WebRTC] Could not load TURN credentials; continuing with STUN only:', error.message);
+      return STUN_ICE_SERVERS;
+    }
+  }, []);
+
   // Create RTCPeerConnection
-  const createPeerConnection = useCallback((targetId) => {
+  const createPeerConnection = useCallback(async (targetId) => {
+    if (statsIntervalRef.current) {
+      clearInterval(statsIntervalRef.current);
+      statsIntervalRef.current = null;
+    }
     if (pcRef.current) {
       pcRef.current.close();
     }
-
-    const pc = new RTCPeerConnection(ICE_SERVERS);
-    pcRef.current = pc;
+    pcRef.current = null;
     pendingIceCandidatesRef.current = [];
+
+    const iceServers = await getIceServers();
+
+    const pc = new RTCPeerConnection({
+      iceServers,
+      iceCandidatePoolSize: 10
+    });
+    pcRef.current = pc;
 
     // Add local tracks to peer connection
     if (localStreamRef.current) {
@@ -214,6 +254,88 @@ export function useWebRTC(socket, currentUserId, userName) {
 
     pc.onconnectionstatechange = () => {
       console.log('[WebRTC] Connection state:', pc.connectionState);
+      if (pc.connectionState === 'connected' && !statsIntervalRef.current) {
+        const previousByteCounts = new Map();
+        const logConnectionStats = async () => {
+          try {
+            const stats = await pc.getStats();
+            let selectedPair = null;
+
+            stats.forEach((report) => {
+              if (report.type === 'transport' && report.selectedCandidatePairId) {
+                selectedPair = stats.get(report.selectedCandidatePairId);
+              }
+            });
+
+            if (!selectedPair) {
+              stats.forEach((report) => {
+                if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+                  selectedPair = report;
+                }
+              });
+            }
+
+            const localCandidate = selectedPair && stats.get(selectedPair.localCandidateId);
+            const remoteCandidate = selectedPair && stats.get(selectedPair.remoteCandidateId);
+            const media = [];
+
+            stats.forEach((report) => {
+              if (report.type !== 'inbound-rtp' && report.type !== 'outbound-rtp') return;
+              if (report.isRemote || report.kind === 'application') return;
+
+              const bytes = report.type === 'inbound-rtp' ? report.bytesReceived : report.bytesSent;
+              const previous = previousByteCounts.get(report.id);
+              let bitrateKbps = null;
+              if (Number.isFinite(bytes) && previous && report.timestamp > previous.timestamp) {
+                bitrateKbps = Math.round(
+                  ((bytes - previous.bytes) * 8) / (report.timestamp - previous.timestamp)
+                );
+              }
+              if (Number.isFinite(bytes)) {
+                previousByteCounts.set(report.id, { bytes, timestamp: report.timestamp });
+              }
+
+              const item = {
+                direction: report.type === 'inbound-rtp' ? 'in' : 'out',
+                kind: report.kind || report.mediaType,
+                bitrateKbps
+              };
+              if (report.type === 'inbound-rtp') {
+                item.jitterMs = Number.isFinite(report.jitter) ? Math.round(report.jitter * 1000) : undefined;
+                item.packetsLost = report.packetsLost;
+                item.packetsReceived = report.packetsReceived;
+                if (Number.isFinite(report.packetsLost) && Number.isFinite(report.packetsReceived)) {
+                  const totalPackets = report.packetsLost + report.packetsReceived;
+                  item.packetLossPercent = totalPackets > 0
+                    ? Math.round((report.packetsLost / totalPackets) * 1000) / 10
+                    : 0;
+                }
+                item.framesDropped = report.framesDropped;
+              }
+              media.push(item);
+            });
+
+            console.info('[WebRTC] Connection diagnostics:', {
+              path: localCandidate && remoteCandidate
+                ? `${localCandidate.candidateType} -> ${remoteCandidate.candidateType}`
+                : 'candidate pair unavailable',
+              rttMs: Number.isFinite(selectedPair?.currentRoundTripTime)
+                ? Math.round(selectedPair.currentRoundTripTime * 1000)
+                : null,
+              media
+            });
+          } catch (error) {
+            console.warn('[WebRTC] Could not collect connection diagnostics:', error.message);
+          }
+        };
+
+        logConnectionStats();
+        statsIntervalRef.current = setInterval(logConnectionStats, 10000);
+      } else if (pc.connectionState !== 'connected' && statsIntervalRef.current) {
+        clearInterval(statsIntervalRef.current);
+        statsIntervalRef.current = null;
+      }
+
       if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         remoteStreamRef.current = null;
         setRemoteStream(null);
@@ -221,7 +343,7 @@ export function useWebRTC(socket, currentUserId, userName) {
     };
 
     return pc;
-  }, [socket]);
+  }, [socket, getIceServers]);
 
   // Handle incoming signals and events from socket
   useEffect(() => {
@@ -230,7 +352,7 @@ export function useWebRTC(socket, currentUserId, userName) {
     const handleUserJoined = async ({ id, name }) => {
       console.log('[WebRTC] New user joined room, initiating offer to:', name, id);
       setConnectedPeer({ id, name });
-      const pc = createPeerConnection(id);
+      const pc = await createPeerConnection(id);
 
       try {
         const offer = await pc.createOffer();
@@ -263,7 +385,7 @@ export function useWebRTC(socket, currentUserId, userName) {
       if (signal.type === 'offer') {
         let pc = pcRef.current;
         if (!pc || pc.connectionState === 'closed') {
-          pc = createPeerConnection(senderId);
+          pc = await createPeerConnection(senderId);
         }
 
         try {
@@ -290,8 +412,8 @@ export function useWebRTC(socket, currentUserId, userName) {
           }
         }
       } else if (signal.type === 'candidate') {
-        if (pcRef.current && signal.candidate) {
-          if (pcRef.current.remoteDescription) {
+        if (signal.candidate) {
+          if (pcRef.current && pcRef.current.remoteDescription) {
             try {
               await pcRef.current.addIceCandidate(new RTCIceCandidate(signal.candidate));
             } catch (err) {
@@ -333,9 +455,13 @@ export function useWebRTC(socket, currentUserId, userName) {
         remoteStreamRef.current = null;
         setRemoteStream(null);
         setRemoteScreenSharing({ isSharing: false, userName: '' });
-        if (pcRef.current) {
-          pcRef.current.close();
-          pcRef.current = null;
+      if (statsIntervalRef.current) {
+        clearInterval(statsIntervalRef.current);
+        statsIntervalRef.current = null;
+      }
+      if (pcRef.current) {
+        pcRef.current.close();
+        pcRef.current = null;
         }
       }
     };
@@ -345,6 +471,10 @@ export function useWebRTC(socket, currentUserId, userName) {
       setIsScreenSharing(false);
       remoteStreamRef.current = null;
       setRemoteStream(null);
+      if (statsIntervalRef.current) {
+        clearInterval(statsIntervalRef.current);
+        statsIntervalRef.current = null;
+      }
     };
 
     socket.on('room-joined', handleRoomJoined);
@@ -393,12 +523,12 @@ export function useWebRTC(socket, currentUserId, userName) {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
             cursor: 'always',
-            frameRate: { ideal: 30, max: 30 }
+            frameRate: { ideal: 15, max: 15 }
           },
           audio: false
         });
         const screenTrack = screenStream.getVideoTracks()[0];
-        screenTrack.contentHint = 'detail';
+        screenTrack.contentHint = 'motion';
         screenTrack.enabled = true;
 
         // Replace outgoing video track in peer connection
@@ -415,7 +545,7 @@ export function useWebRTC(socket, currentUserId, userName) {
             try {
               const params = videoSender.getParameters();
               if (params && params.encodings && params.encodings.length > 0) {
-                params.encodings[0].maxBitrate = 3000000;
+                params.encodings[0].maxBitrate = 1200000;
                 await videoSender.setParameters(params);
               }
             } catch (e) {}

@@ -175,6 +175,7 @@ export default function VideoOverlay({
   const { t } = useLanguage();
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  const remoteAudioRef = useRef(null);
   const screenPopupRef = useRef(null);
 
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -223,12 +224,24 @@ export default function VideoOverlay({
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
     }
-  }, [localStream]);
+  }, [localStream, isCamOn, isCollapsed]);
 
   // Bind remote stream
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
       remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream, remoteScreenSharing?.isSharing, isCollapsed]);
+
+  useEffect(() => {
+    const audioElement = remoteAudioRef.current;
+    if (!audioElement) return;
+
+    audioElement.srcObject = remoteStream;
+    if (remoteStream) {
+      audioElement.play().catch((error) => {
+        console.warn('[WebRTC] Remote audio playback was blocked:', error.message);
+      });
     }
   }, [remoteStream]);
 
@@ -410,6 +423,8 @@ export default function VideoOverlay({
           isCollapsed ? 'w-auto' : 'w-72'
         }`}
       >
+        <audio ref={remoteAudioRef} autoPlay hidden />
+
         {/* Header Bar */}
         <div className="glass-panel w-full px-3 py-2 rounded-xl flex items-center justify-between shadow-lg">
           <div className="flex items-center gap-2 overflow-hidden">
@@ -445,8 +460,10 @@ export default function VideoOverlay({
         </div>
 
         {/* Video Feeds Container */}
-        {!isCollapsed && (
-          <div className="w-full flex flex-col gap-2 animate-fade-in">
+        <div
+          className="w-full flex flex-col gap-2 animate-fade-in"
+          style={{ display: isCollapsed ? 'none' : 'flex' }}
+        >
             {/* Remote Peer Video */}
             <div className="video-card w-full h-44 relative bg-slate-900 flex items-center justify-center overflow-hidden">
               {remoteScreenSharing?.isSharing ? (
@@ -478,7 +495,7 @@ export default function VideoOverlay({
                   />
                 </div>
               ) : remoteStream ? (
-                <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                <video ref={remoteVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
               ) : (
                 <div className="flex flex-col items-center justify-center text-slate-400 text-xs gap-1.5 p-4 text-center">
                   <div className="w-9 h-9 rounded-full bg-slate-800 flex items-center justify-center text-slate-300">
@@ -586,8 +603,7 @@ export default function VideoOverlay({
                 {t('praiseHeart')}
               </button>
             </div>
-          </div>
-        )}
+        </div>
       </div>
 
       {/* Floating Chat Message Toast */}
