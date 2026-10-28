@@ -54,18 +54,28 @@
 - **Cửa sổ nổi độc lập (`screen-viewer.html`)**: Mở màn hình chia sẻ sang một cửa sổ trình duyệt riêng biệt nổi lên trên, vừa xem bài giảng vừa thao tác trên bảng.
 - **Tự động thích ứng**: Tích hợp luồng Video Canvas dự phòng khi test 2 tab trên cùng 1 máy tính; chia sẻ màn hình ưu tiên độ phản hồi với `contentHint = 'motion'`.
 
-### 4. 🎙️ Ghi Hình Buổi Học Toàn Diện (Full Web Tab & Mixed Audio)
+### 4. 👀 Chế Độ Người Theo Dõi (Spectator)
+- Phòng tự gán một người dạy và một học sinh đầu tiên; người vào sau bằng link cũ sẽ là người theo dõi.
+- Khi mở link học sinh, ứng dụng kiểm tra trạng thái phòng trước: nếu giáo viên và học sinh đã có mặt, hiển thị ngay màn hình người theo dõi.
+- Người theo dõi nhập tên, chọn vai trò **Cha**, **Mẹ** hoặc **Khác**; tên hiển thị trong lớp theo dạng `Tên (Vai trò)`.
+- Người theo dõi xem bảng ở chế độ chỉ đọc: thanh công cụ vẽ được ẩn, kéo hoặc cuộn để di chuyển khung nhìn, không thể vẽ hay sửa nội dung bảng.
+- Danh sách người theo dõi được hiển thị và cập nhật khi có người vào/rời phòng. Spectator nhận video/âm thanh trực tiếp từ người dạy và học sinh, đồng thời có thể chat và gửi lời cổ vũ.
+- Người dạy có thể kick học sinh để chuyển họ sang chế độ theo dõi, hoặc kick người theo dõi ra khỏi phòng; người bị kick khỏi phòng sẽ thấy thông báo có tên người dạy.
+- Người theo dõi không cần cấp quyền mic/camera, không thể chia sẻ màn hình và không thể thao tác để thay đổi nội dung bảng.
+- Đây vẫn là WebRTC P2P: mỗi người dạy/học sinh gửi thêm một kết nối tới từng người theo dõi. Băng thông tải lên và số kết nối tăng tuyến tính theo số người theo dõi; TURN có thể làm tăng lưu lượng relay. Chế độ này phù hợp nhóm nhỏ, không thay thế SFU cho lớp đông.
+
+### 5. 🎙️ Ghi Hình Buổi Học Toàn Diện (Full Web Tab & Mixed Audio)
 - Nút **"Ghi hình Tab Web"** chuyên dụng: Quay lại chính xác toàn bộ giao diện bảng đen, thao tác viết vẽ, hình ảnh bài tập và video call.
 - **Trộn âm thanh đa kênh (Web Audio API)**: Kết hợp đồng thời tiếng micro của giáo viên và tiếng của học sinh vào video.
 - **Tự động lưu an toàn về máy**: Video được truyền từng phần (chunk) theo thời gian thực về thư mục `lich-su-hoc-tap/*.webm` trên máy tính giáo viên, không lo mất file khi đột ngột tắt trình duyệt.
 
-### 5. ⭐ Hệ Thống Khen Thưởng Động Viên Đa Giác Quan
+### 6. ⭐ Hệ Thống Khen Thưởng Động Viên Đa Giác Quan
 - 3 cấp độ khen thưởng: 👏 **Giỏi lắm**, ⭐ **10 Điểm**, ❤️ **Cố lên**.
 - **Pháo hoa đặc trưng theo Emoji**: Bắn pháo hoa hình ngôi sao, điểm 100, cúp vô địch hoặc trái tim rực rỡ.
 - **Bảng Vinh Danh Nổi Động**: Xuất hiện chính giữa màn hình với hiệu ứng nảy (`bounce-in`) trong 3.5 giây.
 - **Âm thanh tổng hợp (Web Audio API Synth)**: Chuông chiến thắng kiểu Mario Star Power-Up và âm vang chúc mừng với độ trễ 0ms, không phụ thuộc file mp3 ngoài.
 
-### 6. 💬 Chat & Ghi Chú Tức Thì
+### 7. 💬 Chat & Ghi Chú Tức Thì
 - Hộp thoại tin nhắn bên góc phải hỗ trợ trao đổi công thức, đường dẫn và lời nhắn nhanh.
 - Hiển thị thông báo Toast nổi và biểu tượng số tin nhắn chưa đọc.
 
@@ -97,6 +107,7 @@ Hệ thống sẽ tự động:
 3. **Học sinh vào lớp**:
    - Gửi link qua Zalo/Tin nhắn cho học sinh.
    - Học sinh chỉ cần click vào link bằng bất kỳ trình duyệt nào (**Chrome, Edge, Cốc Cốc, Safari iPad, Điện thoại**) là vào thẳng lớp học mà không cần cài đặt thêm bất kỳ phần mềm nào.
+   - Link có thể được mở lại cho người xem khác; sau khi đã có một người dạy và một học sinh, những người vào tiếp theo sẽ được xếp vào chế độ theo dõi.
 
 ### Cấu hình Cloudflare TURN (tùy chọn)
 

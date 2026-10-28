@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Mic,
   MicOff,
@@ -10,7 +11,9 @@ import {
   Share2,
   MessageCircle,
   X,
-  ExternalLink
+  ExternalLink,
+  Users,
+  UserX
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { useLanguage } from '../context/LanguageContext';
@@ -98,10 +101,13 @@ const playPraiseSound = (type) => {
 // Custom Emoji-shaped Confetti for distinct praises
 const firePraiseConfetti = (type) => {
   try {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const isMobile = window.matchMedia('(max-width: 640px)').matches;
+
     const makeShape = (text, scalar = 2) => {
       if (typeof confetti.shapeFromText === 'function') {
         try {
-          return confetti.shapeFromText({ text, scalar });
+          return confetti.shapeFromText({ text, scalar: isMobile ? 1.2 : scalar });
         } catch {
           return 'circle';
         }
@@ -110,54 +116,100 @@ const firePraiseConfetti = (type) => {
     };
 
     if (type === 'perfect') {
-      const star = makeShape('⭐', 2.3);
-      const score100 = makeShape('💯', 2.3);
-      const trophy = makeShape('🏆', 2.1);
+      const shapes = isMobile
+        ? ['square', 'circle']
+        : [makeShape('⭐', 2.3), makeShape('💯', 2.3), makeShape('🏆', 2.1)];
       confetti({
-        particleCount: 55,
+        resize: true,
+        zIndex: 2147483646,
+        particleCount: isMobile ? 28 : 55,
         spread: 90,
         origin: { y: 0.5 },
-        shapes: [star, score100, trophy],
-        scalar: 1.5,
-        ticks: 250,
+        shapes,
+        scalar: isMobile ? 1.1 : 1.5,
+        ticks: isMobile ? 150 : 250,
         colors: ['#fbbf24', '#f59e0b', '#ef4444', '#10b981']
       });
     } else if (type === 'applause') {
-      const clap = makeShape('👏', 2.2);
-      const party = makeShape('🎉', 2.2);
-      const sparkle = makeShape('✨', 2.0);
+      const shapes = isMobile
+        ? ['square', 'circle']
+        : [makeShape('👏', 2.2), makeShape('🎉', 2.2), makeShape('✨', 2.0)];
       confetti({
-        particleCount: 50,
+        resize: true,
+        zIndex: 2147483646,
+        particleCount: isMobile ? 26 : 50,
         spread: 80,
         origin: { y: 0.55 },
-        shapes: [clap, party, sparkle],
-        scalar: 1.4,
-        ticks: 220,
+        shapes,
+        scalar: isMobile ? 1.05 : 1.4,
+        ticks: isMobile ? 150 : 220,
         colors: ['#10b981', '#34d399', '#3b82f6', '#f59e0b']
       });
     } else if (type === 'heart') {
-      const heart = makeShape('❤️', 2.2);
-      const sparkHeart = makeShape('💖', 2.2);
-      const cherry = makeShape('🌸', 2.0);
+      const shapes = isMobile
+        ? ['square', 'circle']
+        : [makeShape('❤️', 2.2), makeShape('💖', 2.2), makeShape('🌸', 2.0)];
       confetti({
-        particleCount: 45,
+        resize: true,
+        zIndex: 2147483646,
+        particleCount: isMobile ? 24 : 45,
         spread: 75,
         origin: { y: 0.55 },
-        shapes: [heart, sparkHeart, cherry],
-        scalar: 1.4,
-        ticks: 220,
+        shapes,
+        scalar: isMobile ? 1.05 : 1.4,
+        ticks: isMobile ? 150 : 220,
         colors: ['#f43f5e', '#ec4899', '#fb7185', '#fda4af']
       });
     }
   } catch (err) {
     console.warn('Confetti error:', err);
-    confetti({ particleCount: 50, spread: 60 });
+    confetti({
+      resize: true,
+      zIndex: 2147483646,
+      particleCount: window.matchMedia('(max-width: 640px)').matches ? 24 : 50,
+      spread: 60
+    });
   }
 };
+
+function SpectatorStreamTile({ peer }) {
+  const { t } = useLanguage();
+  const videoRef = useRef(null);
+  const audioRef = useRef(null);
+  const hasVideo = peer.stream.getVideoTracks().length > 0;
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.srcObject = peer.stream;
+    if (audioRef.current) {
+      audioRef.current.srcObject = peer.stream;
+      audioRef.current.play().catch((error) => {
+        console.warn('[WebRTC] Spectator audio playback was blocked:', error.message);
+      });
+    }
+  }, [peer.stream]);
+
+  return (
+    <div className="relative min-h-36 rounded-xl overflow-hidden bg-slate-950 border border-white/10">
+      {hasVideo ? (
+        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full min-h-36 object-contain" />
+      ) : (
+        <div className="min-h-36 flex items-center justify-center text-slate-400 text-xs">{t('spectatorAudioOnly')}</div>
+      )}
+      <audio ref={audioRef} autoPlay hidden />
+      <div className="absolute bottom-2 left-2 px-2 py-1 rounded bg-black/70 text-xs text-white">
+        {peer.name}
+      </div>
+    </div>
+  );
+}
 
 export default function VideoOverlay({
   localStream,
   remoteStream,
+  observedStreams = [],
+  spectators = [],
+  isSpectator = false,
+  onKickUser,
   isMicOn,
   isCamOn,
   isScreenSharing,
@@ -185,6 +237,7 @@ export default function VideoOverlay({
   const [latestChatToast, setLatestChatToast] = useState(null);
   const [chatMessages, setChatMessages] = useState([]);
   const [inputMsg, setInputMsg] = useState('');
+  const [showSpectatorList, setShowSpectatorList] = useState(true);
 
   // Floating Praise Badge state
   const [activePraise, setActivePraise] = useState(null);
@@ -373,10 +426,67 @@ export default function VideoOverlay({
     setInputMsg('');
   };
 
+  const visibleSpectators = isSpectator && socket?.id && !spectators.some((peer) => peer.id === socket.id)
+    ? [...spectators, { id: socket.id, name: userName }]
+    : spectators;
+
   return (
     <>
+      <section
+        className={`fixed overflow-hidden rounded-xl border border-amber-300/40 bg-slate-950/95 shadow-2xl backdrop-blur-md ${
+          isSpectator ? 'spectator-overlay-panel' : ''
+        }`}
+        style={{
+          top: isSpectator ? '1rem' : '5rem',
+          left: '1rem',
+          width: isSpectator ? 'min(14rem, 30vw)' : '14rem',
+          maxHeight: isSpectator ? 'calc(100vh - 2rem)' : '40vh',
+          zIndex: 9999
+        }}
+        aria-label={t('spectatorsTitle')}
+      >
+        <button
+          onClick={() => setShowSpectatorList((shown) => !shown)}
+          className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-amber-100"
+          aria-expanded={showSpectatorList}
+        >
+          <Users size={15} className="text-amber-300" />
+          <span className="min-w-0 flex-1 truncate">{t('spectatorsTitle')} ({visibleSpectators.length})</span>
+          <span aria-hidden="true">{showSpectatorList ? '−' : '+'}</span>
+        </button>
+        {showSpectatorList && (
+          <div className="max-h-[30vh] overflow-y-auto border-t border-white/10 px-3 py-2">
+            {visibleSpectators.length ? (
+              <ul className="space-y-1">
+                {visibleSpectators.map((peer) => (
+                  <li key={peer.id} className="flex items-center gap-2 text-[11px] text-slate-200">
+                    <span className="min-w-0 flex-1 truncate">
+                      <span className="mr-1.5 text-amber-300">👀</span>
+                      {peer.name}
+                    </span>
+                    {userRole === 'teacher' && peer.id !== socket?.id && (
+                      <button
+                        type="button"
+                        onClick={() => onKickUser?.(peer.id)}
+                        className="rounded p-1 text-red-300 hover:bg-red-500/20 hover:text-red-200"
+                        title={t('kickUser')}
+                        aria-label={`${t('kickUser')}: ${peer.name}`}
+                      >
+                        <UserX size={13} />
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[11px] text-slate-400">{t('noSpectators')}</p>
+            )}
+          </div>
+        )}
+      </section>
+
       {/* Prominent Floating Animated Praise Badge */}
-      {activePraise && (
+      {activePraise && createPortal(
         <div className="praise-badge-container animate-bounce-in">
           <div className={`praise-badge ${activePraise.badgeClass}`}>
             <div className="praise-badge-icon">
@@ -394,11 +504,12 @@ export default function VideoOverlay({
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Screen Sharing Notification & Quick Re-open Window Banner */}
-      {((remoteScreenSharing?.isSharing && connectedPeer) || isScreenSharing) && (
+      {!isSpectator && ((remoteScreenSharing?.isSharing && connectedPeer) || isScreenSharing) && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 glass-panel px-4 py-2 rounded-2xl border border-emerald-400/40 shadow-2xl animate-fade-in">
           <div className="w-3 h-3 rounded-full bg-emerald-400 animate-ping" />
           <span className="text-xs font-semibold text-white">
@@ -417,8 +528,67 @@ export default function VideoOverlay({
         </div>
       )}
 
+      {isSpectator && (
+        <section
+          className="fixed top-4 right-4 max-h-full overflow-y-auto glass-panel spectator-overlay-panel rounded-2xl border border-amber-300/30 p-3 shadow-2xl"
+          style={{
+            right: '1rem',
+            left: 'auto',
+            width: 'min(28rem, 58vw)',
+            maxHeight: 'calc(100vh - 2rem)',
+            zIndex: 10000
+          }}
+          aria-label={t('spectatorMode')}
+        >
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div>
+              <div className="text-sm font-bold text-amber-200">👀 {t('spectatorMode')}</div>
+              <div className="text-[11px] text-slate-300">
+                {t('spectatorWatching', { count: observedStreams.length })}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleOpenChat}
+                className={`relative p-2 rounded-lg ${showChat ? 'bg-emerald-600 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                title={t('notesAndChat')}
+              >
+                <MessageCircle size={16} />
+                {unreadCount > 0 && !showChat && (
+                  <span className="chat-badge">{unreadCount > 9 ? '9+' : unreadCount}</span>
+                )}
+              </button>
+              <Users size={18} className="text-amber-300" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {observedStreams.map((peer) => (
+              <SpectatorStreamTile key={peer.id} peer={peer} />
+            ))}
+            {observedStreams.length === 0 && (
+              <div className="col-span-full min-h-28 rounded-xl bg-black/20 flex items-center justify-center text-xs text-slate-300 text-center p-4">
+                {t('spectatorWaiting')}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-3 flex items-center justify-around gap-1 border-t border-white/10 pt-2">
+            <button onClick={() => handleReaction('applause', 'Vỗ tay')} className="btn-reaction px-2 py-1 rounded-lg text-xs">
+              {t('praiseClap')}
+            </button>
+            <button onClick={() => handleReaction('perfect', 'Điểm 10')} className="btn-reaction px-2 py-1 rounded-lg text-xs text-yellow-300">
+              {t('praise10')}
+            </button>
+            <button onClick={() => handleReaction('heart', 'Thả tim')} className="btn-reaction px-2 py-1 rounded-lg text-xs text-rose-300">
+              {t('praiseHeart')}
+            </button>
+          </div>
+        </section>
+      )}
+
       {/* Floating Video Dock (Top Right) */}
-      <div
+      {!isSpectator && <div
         className={`absolute top-4 right-6 z-40 transition-all duration-300 flex flex-col items-end gap-2 ${
           isCollapsed ? 'w-auto' : 'w-72'
         }`}
@@ -512,8 +682,21 @@ export default function VideoOverlay({
                   )}
                 </div>
               )}
-              <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded bg-black/70 backdrop-blur-sm text-[11px] text-slate-200">
-                {connectedPeer ? connectedPeer.name : (userRole === 'teacher' ? t('roleStudentTag') : t('roleTeacherTag'))}
+              <div className="absolute bottom-2 left-2 right-2 flex items-center gap-2 px-2 py-0.5 rounded bg-black/70 backdrop-blur-sm text-[11px] text-slate-200">
+                <span className="min-w-0 flex-1 truncate">
+                  {connectedPeer ? connectedPeer.name : (userRole === 'teacher' ? t('roleStudentTag') : t('roleTeacherTag'))}
+                </span>
+                {userRole === 'teacher' && connectedPeer?.role === 'student' && (
+                  <button
+                    type="button"
+                    onClick={() => onKickUser?.(connectedPeer.id)}
+                    className="rounded p-1 text-red-300 hover:bg-red-500/20 hover:text-red-200"
+                    title={t('kickUser')}
+                    aria-label={`${t('kickUser')}: ${connectedPeer.name}`}
+                  >
+                    <UserX size={13} />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -604,10 +787,10 @@ export default function VideoOverlay({
               </button>
             </div>
         </div>
-      </div>
+      </div>}
 
       {/* Floating Chat Message Toast */}
-      {latestChatToast && !showChat && (
+      {!isSpectator && latestChatToast && !showChat && (
         <div
           onClick={handleOpenChat}
           className="fixed top-20 right-80 z-50 glass-panel px-4 py-2.5 rounded-2xl border border-emerald-400/40 shadow-2xl flex items-center gap-2 cursor-pointer animate-fade-in hover:scale-105 transition"
@@ -622,7 +805,18 @@ export default function VideoOverlay({
 
       {/* Quick Chat Drawer */}
       {showChat && (
-        <div className="absolute top-20 right-80 z-40 w-80 h-80 glass-panel rounded-2xl flex flex-col overflow-hidden shadow-2xl animate-fade-in border border-white/20">
+        <div
+          className={`glass-panel rounded-2xl flex flex-col overflow-hidden shadow-2xl animate-fade-in border border-white/20 ${
+            isSpectator ? 'fixed' : 'absolute w-80 h-80 top-20 right-80 z-40'
+          }`}
+          style={isSpectator ? {
+            width: 'min(20rem, calc(100vw - 2rem))',
+            height: 'min(20rem, calc(100dvh - 2rem))',
+            bottom: '1rem',
+            left: '1rem',
+            zIndex: 10001
+          } : undefined}
+        >
           <div className="px-3.5 py-2.5 bg-white/5 border-b border-white/10 flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <MessageCircle size={15} className="text-emerald-400" />

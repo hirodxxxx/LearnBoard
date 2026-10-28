@@ -217,46 +217,158 @@ io.on('connection', (socket) => {
     roomId: currentDefaultRoomId
   });
 
+  socket.on('check-room-status', ({ roomId } = {}, acknowledge) => {
+    if (typeof acknowledge !== 'function') return;
+    const requestedRoomId = typeof roomId === 'string' ? roomId.trim() : '';
+    const room = requestedRoomId ? rooms.get(requestedRoomId) : null;
+    const activeRoles = new Set(
+      room
+        ? Array.from(room.users.values())
+          .filter((user) => user.ready)
+          .map((user) => user.role)
+        : []
+    );
+
+    acknowledge({
+      hasTeacher: activeRoles.has('teacher'),
+      hasStudent: activeRoles.has('student')
+    });
+  });
+
   // Host updates room ID
   socket.on('set-room-id', ({ roomId }) => {
-    if (roomId && roomId.trim()) {
+    if (currentUser?.role !== 'spectator' && roomId && roomId.trim()) {
       currentDefaultRoomId = roomId.trim();
       io.emit('room-id-updated', { roomId: currentDefaultRoomId });
     }
   });
 
   // User joins a classroom
-  socket.on('join-room', ({ roomId = currentDefaultRoomId, userName = 'Thành viên', role = 'teacher' }) => {
+  socket.on('join-room', ({ roomId = currentDefaultRoomId, userName = 'Thành viên', role = 'student' }) => {
     currentRoomId = roomId;
-    currentUser = { id: socket.id, name: userName, role };
+    const room = getOrCreateRoom(roomId);
+    const activeUsers = Array.from(room.users.values());
+    const assignedRole = role === 'teacher' && !activeUsers.some((user) => user.role === 'teacher')
+      ? 'teacher'
+      : role === 'student' && !activeUsers.some((user) => user.role === 'student')
+        ? 'student'
+        : 'spectator';
+    currentUser = { id: socket.id, name: userName, role: assignedRole, ready: false };
 
     socket.join(roomId);
-    const room = getOrCreateRoom(roomId);
     room.users.set(socket.id, currentUser);
 
-    console.log(`[+] ${userName} (${role}) joined room: ${roomId}`);
+    console.log(`[+] ${userName} (${assignedRole}) joined room: ${roomId}`);
 
     const existingUsers = Array.from(room.users.entries())
-      .filter(([id]) => id !== socket.id)
+      .filter(([id, user]) => id !== socket.id && user.ready)
       .map(([id, user]) => ({ id, name: user.name, role: user.role }));
 
     socket.emit('room-joined', {
       selfId: socket.id,
+      selfRole: assignedRole,
       users: existingUsers,
       elements: room.elements,
       tunnelUrl: publicTunnelUrl,
       roomId: currentDefaultRoomId
     });
+  });
 
-    socket.to(roomId).emit('user-joined', {
-      id: socket.id,
-      name: userName,
-      role
+  socket.on('room-ready', () => {
+    if (!currentRoomId || !currentUser || currentUser.ready) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || room.users.get(socket.id) !== currentUser) return;
+
+    currentUser.ready = true;
+    const existingUsers = Array.from(room.users.entries())
+      .filter(([id, user]) => id !== socket.id && user.ready)
+      .map(([id, user]) => ({ id, name: user.name, role: user.role }));
+
+    socket.emit('room-ready', {
+      selfRole: currentUser.role,
+      users: existingUsers,
+      elements: room.elements
     });
+
+    for (const [peerId, user] of room.users) {
+      if (peerId !== socket.id && user.ready) {
+        io.to(peerId).emit('user-joined', {
+          id: socket.id,
+          name: currentUser.name,
+          role: currentUser.role
+        });
+      }
+    }
+  });
+
+  socket.on('update-user-name', (name) => {
+    if (!currentRoomId || !currentUser || typeof name !== 'string') return;
+    const normalizedName = name.trim().slice(0, 60);
+    if (!normalizedName) return;
+    currentUser.name = normalizedName;
+    io.to(currentRoomId).emit('user-updated', {
+      id: socket.id,
+      name: currentUser.name,
+      role: currentUser.role
+    });
+  });
+
+  socket.on('kick-user', ({ targetId } = {}) => {
+    if (currentUser?.role !== 'teacher' || !currentRoomId || typeof targetId !== 'string') return;
+    const room = rooms.get(currentRoomId);
+    const targetUser = room?.users.get(targetId);
+    const targetSocket = io.sockets.sockets.get(targetId);
+    if (!room || !targetUser || !targetSocket || targetId === socket.id || targetUser.role === 'teacher') return;
+
+    if (targetUser.role === 'student') {
+      targetUser.role = 'spectator';
+      io.to(currentRoomId).emit('user-role-updated', {
+        id: targetId,
+        name: targetUser.name,
+        role: targetUser.role
+      });
+      targetSocket.emit('user-kicked', {
+        action: 'spectator',
+        teacherName: currentUser.name
+      });
+      console.log(`[Class] ${targetUser.name} was moved to spectator by ${currentUser.name} in room: ${currentRoomId}`);
+      return;
+    }
+
+    if (targetUser.role === 'spectator') {
+      room.users.delete(targetId);
+      targetSocket.leave(currentRoomId);
+      io.to(currentRoomId).emit('user-left', { id: targetId });
+      targetSocket.emit('user-kicked', {
+        action: 'removed',
+        teacherName: currentUser.name
+      }, () => targetSocket.disconnect(true));
+      console.log(`[Class] ${targetUser.name} was removed by ${currentUser.name} in room: ${currentRoomId}`);
+    }
+  });
+
+  socket.on('request-board-sync', () => {
+    if (!currentRoomId || !currentUser?.ready) return;
+    const room = rooms.get(currentRoomId);
+    if (room) socket.emit('board-sync-all', room.elements);
   });
 
   // WebRTC Signaling
   socket.on('webrtc-signal', ({ targetId, signal }) => {
+    if (!currentRoomId || !currentUser || !targetId || !signal) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || !room.users.has(targetId) || !room.users.has(socket.id)) return;
+    const targetUser = room.users.get(targetId);
+    if (!currentUser.ready || !targetUser.ready) return;
+    if (!['offer', 'answer', 'candidate'].includes(signal.type)) return;
+    if (currentUser.role === 'spectator') {
+      if (signal.scope !== 'spectator' || targetUser.role === 'spectator' || signal.type === 'offer') return;
+    } else if (signal.scope === 'spectator') {
+      if (targetUser.role !== 'spectator') return;
+    } else if (targetUser.role === 'spectator') {
+      return;
+    }
+
     io.to(targetId).emit('webrtc-signal', {
       senderId: socket.id,
       senderName: currentUser ? currentUser.name : (currentUser?.role === 'teacher' ? 'Người dạy' : 'Học sinh'),
@@ -267,6 +379,7 @@ io.on('connection', (socket) => {
 
   // Stream recording chunks directly to disk in real-time
   socket.on('record-chunk-append', ({ fileName, chunk }) => {
+    if (currentUser?.role === 'spectator') return;
     if (!fileName || !chunk) return;
     const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
     const targetFilePath = path.join(recordingsDir, sanitizedFileName);
@@ -277,7 +390,7 @@ io.on('connection', (socket) => {
 
   // Screen Share Status Notification
   socket.on('screen-share-status', ({ isSharing, userName }) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     socket.to(currentRoomId).emit('screen-share-status', {
       senderId: socket.id,
       senderName: userName || (currentUser ? currentUser.name : 'Người dạy'),
@@ -287,7 +400,7 @@ io.on('connection', (socket) => {
 
   // Real-time Drawing Stroke
   socket.on('draw-stroke-start', (data) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     socket.to(currentRoomId).emit('draw-stroke-start', {
       ...data,
       senderId: socket.id
@@ -295,7 +408,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('draw-stroke-move', (data) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     socket.to(currentRoomId).emit('draw-stroke-move', {
       ...data,
       senderId: socket.id
@@ -303,7 +416,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('draw-stroke-end', (element) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     const room = getOrCreateRoom(currentRoomId);
     if (element) {
       room.elements.push(element);
@@ -316,7 +429,7 @@ io.on('connection', (socket) => {
 
   // Laser Pointer & Cursor Sync
   socket.on('cursor-move', (data) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     socket.to(currentRoomId).emit('cursor-move', {
       ...data,
       senderId: socket.id,
@@ -326,7 +439,7 @@ io.on('connection', (socket) => {
 
   // Update / Drag / Resize Element
   socket.on('update-element', (updatedElement) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     const room = getOrCreateRoom(currentRoomId);
     const index = room.elements.findIndex((el) => el.id === updatedElement.id);
     if (index !== -1) {
@@ -337,7 +450,7 @@ io.on('connection', (socket) => {
 
   // Delete Element
   socket.on('delete-element', ({ id }) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     const room = getOrCreateRoom(currentRoomId);
     room.elements = room.elements.filter((el) => el.id !== id);
     socket.to(currentRoomId).emit('delete-element', { id });
@@ -345,7 +458,7 @@ io.on('connection', (socket) => {
 
   // Undo
   socket.on('board-undo', () => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     const room = getOrCreateRoom(currentRoomId);
     if (room.elements.length > 0) {
       room.elements.pop();
@@ -355,7 +468,7 @@ io.on('connection', (socket) => {
 
   // Clear Board
   socket.on('board-clear', () => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role === 'spectator') return;
     const room = getOrCreateRoom(currentRoomId);
     room.elements = [];
     io.to(currentRoomId).emit('board-sync-all', []);
@@ -373,7 +486,7 @@ io.on('connection', (socket) => {
 
   // Chat message
   socket.on('send-chat', (message) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || !currentUser) return;
     io.to(currentRoomId).emit('receive-chat', {
       senderId: socket.id,
       senderName: currentUser ? currentUser.name : 'Thành viên',
@@ -385,7 +498,7 @@ io.on('connection', (socket) => {
 
   // Teacher Ends Class
   socket.on('teacher-ended-class', () => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || currentUser?.role !== 'teacher') return;
     console.log(`[Class] Teacher ended class in room: ${currentRoomId}`);
     io.to(currentRoomId).emit('class-ended');
   });

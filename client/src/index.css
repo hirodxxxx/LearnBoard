@@ -314,6 +314,10 @@ input[readonly] {
   box-shadow: 0 12px 32px 0 rgba(0, 0, 0, 0.55);
 }
 
+.spectator-overlay-panel {
+  background: rgba(2, 6, 23, 0.98) !important;
+}
+
 /* Tool Buttons */
 .tool-btn {
   display: flex;
@@ -545,11 +549,13 @@ input[readonly] {
 /* Praise Encouragement Animated Badge */
 .praise-badge-container {
   position: fixed;
-  top: 72px;
+  top: calc(env(safe-area-inset-top, 0px) + 72px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 60;
+  z-index: 2147483647;
   pointer-events: none;
+  width: max-content;
+  max-width: calc(100vw - 24px);
 }
 
 .praise-badge {
@@ -561,8 +567,8 @@ input[readonly] {
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   color: #ffffff;
-  min-width: 320px;
-  max-width: 500px;
+  min-width: min(320px, calc(100vw - 24px));
+  max-width: 100%;
   border-width: 2px;
   border-style: solid;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);

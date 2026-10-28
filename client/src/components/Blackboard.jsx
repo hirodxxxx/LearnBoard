@@ -55,6 +55,8 @@ export default function Blackboard({
   socket,
   userName,
   userRole,
+  readOnly = false,
+  initialElements = null,
   roomId,
   localStream,
   remoteStream,
@@ -66,6 +68,7 @@ export default function Blackboard({
   const mainCanvasRef = useRef(null);
   const previewCanvasRef = useRef(null);
   const fileInputRef = useRef(null);
+  const initialBoardElements = Array.isArray(initialElements) ? initialElements : [];
 
   // Tools & State
   const [activeTool, setActiveTool] = useState('pen');
@@ -79,12 +82,16 @@ export default function Blackboard({
   // Independent Zoom & Pan State (Local to each user)
   const [zoom, setZoom] = useState({ scale: 1.0, offsetX: 0, offsetY: 0 });
   const zoomRef = useRef(zoom);
+  const panStartRef = useRef(null);
+  const [isPanning, setIsPanning] = useState(false);
   useEffect(() => {
     zoomRef.current = zoom;
   }, [zoom]);
 
   // Image elements with Pinning support
-  const [exerciseImages, setExerciseImages] = useState([]);
+  const [exerciseImages, setExerciseImages] = useState(() =>
+    initialBoardElements.filter((element) => element.type === 'image')
+  );
   const imagesRef = useRef([]);
   useEffect(() => {
     imagesRef.current = exerciseImages;
@@ -97,7 +104,7 @@ export default function Blackboard({
   const [textModalPos, setTextModalPos] = useState({ x: 200, y: 150 });
 
   // Drawing elements
-  const elementsRef = useRef([]);
+  const elementsRef = useRef(initialBoardElements.filter((element) => element.type !== 'image'));
   const isDrawingRef = useRef(false);
   const currentStrokeRef = useRef(null);
   const startPointRef = useRef(null);
@@ -253,6 +260,15 @@ export default function Blackboard({
   // Wheel Zoom (Independent, towards mouse cursor)
   const handleWheel = (e) => {
     e.preventDefault();
+    if (readOnly && !e.ctrlKey) {
+      setZoom((prev) => ({
+        ...prev,
+        offsetX: prev.offsetX - e.deltaX,
+        offsetY: prev.offsetY - e.deltaY
+      }));
+      return;
+    }
+
     const container = containerRef.current;
     if (!container) return;
 
@@ -311,20 +327,6 @@ export default function Blackboard({
   // Socket Events & Class Ended notification
   useEffect(() => {
     if (!socket) return;
-
-    socket.on('room-joined', ({ elements }) => {
-      if (elements && Array.isArray(elements)) {
-        const strokes = [];
-        const imgs = [];
-        elements.forEach((el) => {
-          if (el.type === 'image') imgs.push(el);
-          else strokes.push(el);
-        });
-        elementsRef.current = strokes;
-        setExerciseImages(imgs);
-        redrawBoard();
-      }
-    });
 
     socket.on('draw-stroke-start', ({ stroke, senderId }) => {
       if (stroke) {
@@ -449,8 +451,9 @@ export default function Blackboard({
       }, 4000);
     });
 
+    socket.emit('request-board-sync');
+
     return () => {
-      socket.off('room-joined');
       socket.off('draw-stroke-start');
       socket.off('draw-stroke-move');
       socket.off('draw-stroke-end');
@@ -528,6 +531,7 @@ export default function Blackboard({
   // Handle Clipboard Paste (Ctrl+V) for Exercise Photos
   useEffect(() => {
     const handlePaste = (e) => {
+      if (readOnly) return;
       const items = e.clipboardData?.items;
       if (!items) return;
 
@@ -572,7 +576,7 @@ export default function Blackboard({
 
     window.addEventListener('paste', handlePaste);
     return () => window.removeEventListener('paste', handlePaste);
-  }, [socket]);
+  }, [readOnly, socket]);
 
   // Toggle Pin / Unpin image
   const handleTogglePinImage = (imgId) => {
@@ -590,6 +594,7 @@ export default function Blackboard({
 
   // Dragging unpinned image with direct DOM transform for buttery-smooth 60fps
   const handleStartDragImage = (e, img) => {
+    if (readOnly) return;
     e.stopPropagation();
     e.preventDefault();
     const id = img.id;
@@ -633,6 +638,7 @@ export default function Blackboard({
 
   // Resizing unpinned image with direct DOM transform for buttery-smooth 60fps
   const handleStartResizeImage = (e, img) => {
+    if (readOnly) return;
     e.stopPropagation();
     e.preventDefault();
     const id = img.id;
@@ -684,6 +690,20 @@ export default function Blackboard({
 
   // Pointer Down (Draw / Text click)
   const handlePointerDown = (e) => {
+    if (readOnly) {
+      if (e.button !== 0 || e.target.closest('button, input, textarea')) return;
+      e.preventDefault();
+      panStartRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        offsetX: zoomRef.current.offsetX,
+        offsetY: zoomRef.current.offsetY
+      };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setIsPanning(true);
+      return;
+    }
+
     const { x, y } = toWorldCoords(e.clientX, e.clientY);
     isDrawingRef.current = true;
     startPointRef.current = { x, y };
@@ -722,6 +742,16 @@ export default function Blackboard({
 
   // Pointer Move
   const handlePointerMove = (e) => {
+    if (readOnly) {
+      const panStart = panStartRef.current;
+      if (!panStart) return;
+      setZoom((prev) => ({
+        ...prev,
+        offsetX: panStart.offsetX + e.clientX - panStart.x,
+        offsetY: panStart.offsetY + e.clientY - panStart.y
+      }));
+      return;
+    }
 
     const { x, y } = toWorldCoords(e.clientX, e.clientY);
 
@@ -806,6 +836,15 @@ export default function Blackboard({
 
   // Pointer Up
   const handlePointerUp = (e) => {
+    if (readOnly) {
+      if (panStartRef.current && e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+      panStartRef.current = null;
+      setIsPanning(false);
+      return;
+    }
+
     draggingImgRef.current = null;
     resizingImgRef.current = null;
 
@@ -1408,7 +1447,9 @@ export default function Blackboard({
       onWheel={handleWheel}
       className={`blackboard-container ${boardBg === 'green' ? 'board-green' : 'board-dark'}`}
       style={{
-        cursor: activeTool === 'laser' ? 'crosshair' : activeTool === 'eraser' ? 'cell' : 'default'
+        cursor: readOnly
+          ? (isPanning ? 'grabbing' : 'grab')
+          : activeTool === 'laser' ? 'crosshair' : activeTool === 'eraser' ? 'cell' : 'default'
       }}
     >
       <div className="blackboard-texture" />
@@ -1452,7 +1493,8 @@ export default function Blackboard({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onPointerLeave={readOnly ? undefined : handlePointerUp}
         className="absolute inset-0 z-25 block touch-none pointer-events-auto"
       />
 
@@ -1462,7 +1504,7 @@ export default function Blackboard({
         style={{
           transform: `translate(${zoom.offsetX}px, ${zoom.offsetY}px) scale(${zoom.scale})`,
           transformOrigin: '0 0',
-          pointerEvents: hasUnpinnedImage ? 'auto' : 'none'
+          pointerEvents: !readOnly && hasUnpinnedImage ? 'auto' : 'none'
         }}
       >
         {exerciseImages.map((img) => (
@@ -1523,7 +1565,7 @@ export default function Blackboard({
       </div>
 
       {/* Layer 3: Unpin Buttons Layer for Pinned Images (z-35, allows unpinning even when image is pinned) */}
-      <div
+      {!readOnly && <div
         className="absolute inset-0 z-35 pointer-events-none"
         style={{
           transform: `translate(${zoom.offsetX}px, ${zoom.offsetY}px) scale(${zoom.scale})`,
@@ -1551,7 +1593,7 @@ export default function Blackboard({
               </button>
             </div>
           ))}
-      </div>
+      </div>}
 
       {/* Remote cursors display */}
       {Object.entries(remoteCursors).map(([id, cursor]) => {
@@ -1693,7 +1735,7 @@ export default function Blackboard({
       </div>
 
       {/* Top Floating Main Toolbar */}
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1.5 glass-panel px-3 py-2 rounded-2xl">
+      {!readOnly && <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1.5 glass-panel px-3 py-2 rounded-2xl">
         <button
           onClick={() => setActiveTool('pen')}
           className={`tool-btn ${activeTool === 'pen' ? 'active' : ''}`}
@@ -1804,10 +1846,10 @@ export default function Blackboard({
         <button onClick={handleExportPNG} className="tool-btn hover:text-emerald-400" title={t('toolExport')}>
           <Download size={18} />
         </button>
-      </div>
+      </div>}
 
       {/* Bottom Floating Palette: Chalk Colors & Stroke Thickness */}
-      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-4 glass-panel px-4 py-2 rounded-2xl">
+      {!readOnly && <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-4 glass-panel px-4 py-2 rounded-2xl">
         <div className="flex items-center gap-2">
           {CHALK_COLORS.map((c) => (
             <button
@@ -1845,10 +1887,10 @@ export default function Blackboard({
             </button>
           ))}
         </div>
-      </div>
+      </div>}
 
       {/* Rich Text Editor Modal with Custom Font Sizes */}
-      {showTextModal && (
+      {!readOnly && showTextModal && (
         <div
           className="fixed z-50 glass-panel p-4 rounded-2xl border border-white/20 shadow-2xl animate-fade-in w-80"
           style={{ left: `${textModalPos.x}px`, top: `${textModalPos.y}px` }}
@@ -1911,6 +1953,12 @@ export default function Blackboard({
               <span>{t('textSubmit')}</span>
             </button>
           </form>
+        </div>
+      )}
+
+      {readOnly && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-40 glass-panel rounded-xl border border-amber-300/30 px-4 py-2 text-xs font-semibold text-amber-100 shadow-lg pointer-events-none">
+          {t('spectatorBoardReadOnly')}
         </div>
       )}
     </div>
